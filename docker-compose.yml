@@ -1,0 +1,33 @@
+# New API (QuantumNous/new-api) — deployment config
+# Image: https://hub.docker.com/r/calciumion/new-api
+# Docs: https://docs.newapi.pro
+
+services:
+  new-api:
+    image: calciumion/new-api:latest
+    container_name: new-api
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - new-api-data:/data
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      # Optional: use external DB instead of built-in SQLite
+      # - SQL_DSN=${SQL_DSN:-}
+      # - REDIS_CONN_STRING=${REDIS_CONN_STRING:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/status >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - new-api-network
+
+volumes:
+  new-api-data:
+
+networks:
+  new-api-network:
+    driver: bridge

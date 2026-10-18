@@ -1,0 +1,89 @@
+name: Deploy New API
+
+concurrency:
+  group: deploy-new-api-production
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (default latest)'
+        required: false
+        default: 'latest'
+
+jobs:
+  deploy:
+    name: Deploy to Production Server
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH_NEWAPI || '/opt/new-api' }}
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL_NEWAPI || 'https://api.tokenhubmax.com' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create deploy archive
+        run: |
+          files=(docker-compose.yml .env.example)
+          tar -czf deploy.tgz "${files[@]}"
+
+      - name: Sync project to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST_NEWAPI }}
+          username: ${{ vars.SSH_USER_NEWAPI || 'root' }}
+          key: ${{ secrets.SSH_PRIVATE_KEY_NEWAPI }}
+          port: ${{ vars.SSH_PORT_NEWAPI || 22 }}
+          target: ${{ env.DEPLOY_PATH }}
+          overwrite: true
+          source: "deploy.tgz"
+
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST_NEWAPI }}
+          username: ${{ vars.SSH_USER_NEWAPI || 'root' }}
+          key: ${{ secrets.SSH_PRIVATE_KEY_NEWAPI }}
+          port: ${{ vars.SSH_PORT_NEWAPI || 22 }}
+          script: |
+            set -e
+            [[ "${{ env.DEPLOY_PATH }}" == /* ]] && [[ "${{ env.DEPLOY_PATH }}" != "/" ]] || { echo "Invalid DEPLOY_PATH"; exit 1; }
+            mkdir -p "${{ env.DEPLOY_PATH }}"
+            cd "${{ env.DEPLOY_PATH }}"
+            tar -xzf deploy.tgz
+            rm -f deploy.tgz
+
+            # Ensure .env exists (seed from example on first run only)
+            if [ ! -f .env ]; then
+              cp .env.example .env
+            fi
+
+            # Pull latest image and recreate
+            docker compose pull
+            docker compose up -d --remove-orphans
+
+            # Wait for healthy
+            for i in $(seq 1 30); do
+              status="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' new-api 2>/dev/null || true)"
+              [ "$status" = "healthy" ] && break
+              sleep 5
+            done
+            [ "$status" = "healthy" ] || { docker logs --tail=100 new-api; exit 1; }
+            docker image prune -f
+
+      - name: Health Check
+        continue-on-error: true
+        run: |
+          test -n "${PRODUCTION_URL}"
+          echo "Waiting for service to start..."
+          for i in $(seq 1 10); do
+            if curl -fsSL --connect-timeout 10 "${PRODUCTION_URL}/api/status" > /dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Health check timed out, but container health was verified during deploy"
